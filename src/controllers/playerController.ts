@@ -1,4 +1,4 @@
-const players: { [key: string]: { name: string; password: string; index: number } } = {};
+const players: { [key: string]: { name: string, password: string, index: number } } = {};
 let playerIndex = 0;
 
 export function registerPlayer(name: string, password: string) {
@@ -6,10 +6,6 @@ export function registerPlayer(name: string, password: string) {
         throw new Error('Player already exists.');
     }
 
-    players[name] = {
-        name,
-        password,
-        index: playerIndex++,
-    };
+    players[name] = { name, password, index: playerIndex++ };
     return players[name];
 }
