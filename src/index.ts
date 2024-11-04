@@ -4,8 +4,8 @@ import * as dotenv from 'dotenv';
 
 dotenv.config();
 
-const HTTP_PORT = process.env.HTTP_PORT || 8181;
-const WS_PORT = process.env.WS_PORT || 3000;
+const HTTP_PORT = parseInt(process.env.HTTP_PORT || '8181', 10);
+const WS_PORT = parseInt(process.env.WS_PORT || '3000', 10);
 
 httpServer.listen(HTTP_PORT, () => {
     console.log(`Static HTTP server started on port ${HTTP_PORT}`);

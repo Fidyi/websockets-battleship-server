@@ -1,18 +1,19 @@
 import { WebSocket, WebSocketServer } from 'ws';
-import { registerPlayer } from '../controllers/playerController';
-import { createRoom, getAvailableRooms, addUserToRoom, getRoomById } from '../controllers/gameRoomController';
-import { addShipsToGame, handleAttack, startGame, finishGame, getGameById } from '../controllers/gameController';
-
-let gameIdCounter = 1;
-const games: { gameId: number, players: any[], currentTurn: number, start: boolean }[] = [];
+import { handleRegister, handleLogin, getWinnersData } from '../controllers/playerController';
+import { createRoom, getAvailableRooms, addUserToRoom, getRoomById, getFormattedRooms } from '../controllers/gameRoomController';
+import { handleAddShips, handleAttack, createGame, finishGame } from '../controllers/gameController';
+import { safeSend } from '../utils/safeSend';
 
 export function createWebSocketServer(port: number) {
     const wss = new WebSocketServer({ port });
 
     console.log(`WebSocket server started on port ${port}`);
+    const clients: Set<WebSocket> = new Set();
+    const wsToPlayer: Map<WebSocket, any> = new Map();
 
     wss.on('connection', (ws) => {
         console.log('New client connected');
+        clients.add(ws);
 
         ws.on('message', (message: string) => {
             try {
@@ -23,8 +24,11 @@ export function createWebSocketServer(port: number) {
                     case 'reg':
                         handlePlayerRegistration(ws, command);
                         break;
+                    case 'login':
+                        handlePlayerLogin(ws, command);
+                        break;
                     case 'create_room':
-                        handleCreateRoom(ws);
+                        handleCreateRoom(ws, command);
                         break;
                     case 'add_user_to_room':
                         handleAddUserToRoom(ws, command);
@@ -35,223 +39,191 @@ export function createWebSocketServer(port: number) {
                     case 'attack':
                         handleAttack(ws, command);
                         break;
+                    case 'randomAttack':
+                        handleRandomAttack(ws, command);
+                        break;
                     default:
-                        ws.send(JSON.stringify({ error: 'Unknown command type' }));
+                        safeSend(ws, {
+                            type: 'error',
+                            data: JSON.stringify({ error: 'Unknown command type' }),
+                            id: command.id,
+                        });
                 }
             } catch (error) {
                 console.error('Error handling message:', error);
-                ws.send(JSON.stringify({ error: 'Invalid command format' }));
+                safeSend(ws, {
+                    type: 'error',
+                    data: JSON.stringify({ error: 'Invalid command format' }),
+                    id: 0,
+                });
             }
         });
 
         ws.on('close', () => {
             console.log('Client disconnected');
+            clients.delete(ws);
+            wsToPlayer.delete(ws);
         });
     });
-}
 
-function handlePlayerRegistration(ws: WebSocket, command: any) {
-    try {
-        const data = typeof command.data === 'string' ? JSON.parse(command.data) : command.data;
-        const player = registerPlayer(data.name, data.password);
+    function handlePlayerRegistration(ws: WebSocket, command: any) {
+        try {
+            const data = typeof command.data === 'string' ? JSON.parse(command.data) : command.data;
+            const player = handleRegister(data);
+            wsToPlayer.set(ws, player);
 
-        safeSend(ws, {
-            type: 'reg',
-            data: {
-                name: player.name,
-                index: player.index,
-                error: false,
-                errorText: '',
-            },
-            id: command.id,
-        });
-    } catch (error) {
-        safeSend(ws, {
-            type: 'reg',
-            data: {
-                error: true,
-                errorText: error.message,
-            },
-            id: command.id,
-        });
-    }
-}
-
-function handleCreateRoom(ws: WebSocket) {
-    const roomId = createRoom();
-    const availableRooms = getAvailableRooms();
-    const formattedRooms = availableRooms.map((room) => ({
-        roomId: room.roomId,
-        roomUsers: room.players.map((player) => ({
-            name: player.name,
-            index: player.index,
-        })),
-    }));
-
-    safeSend(ws, {
-        type: 'update_room',
-        data: formattedRooms,
-        id: 0,
-    });
-    console.log(`Room ${roomId} created`);
-}
-
-function handleAddUserToRoom(ws: WebSocket, command: any) {
-    let data;
-
-    try {
-        data = typeof command.data === 'string' ? JSON.parse(command.data) : command.data;
-    } catch (error) {
-        safeSend(ws, {
-            type: 'add_user_to_room',
-            data: {
-                error: true,
-                errorText: 'Invalid data format. Expected JSON object.',
-            },
-            id: command.id,
-        });
-        return;
-    }
-
-    const { indexRoom, playerName } = data;
-
-    try {
-        addUserToRoom(indexRoom, playerName, ws);
-        const room = getRoomById(indexRoom);
-
-        if (room.players.length === 2) {
-            const gameId = createGame(room.players);
-            room.players.forEach((player, index) => {
-                if (player.ws) {
-                    safeSend(player.ws, {
-                        type: 'create_game',
-                        data: {
-                            idGame: gameId,
-                            idPlayer: index,
-                        },
-                        id: 0,
-                    });
-                }
+            safeSend(ws, {
+                type: 'reg',
+                data: JSON.stringify({
+                    name: player.name,
+                    index: player.index,
+                    error: false,
+                    errorText: '',
+                }),
+                id: command.id,
             });
-            console.log(`Game ${gameId} created with players: ${room.players.map(p => p.name).join(', ')}`);
+            safeSend(ws, {
+                type: 'update_winners',
+                data: JSON.stringify(getWinnersData()),
+                id: 0,
+            });
+        } catch (error: any) {
+            safeSend(ws, {
+                type: 'reg',
+                data: JSON.stringify({
+                    error: true,
+                    errorText: error.message,
+                }),
+                id: command.id,
+            });
         }
-
-        const availableRooms = getAvailableRooms();
-        const formattedRooms = availableRooms.map((room) => ({
-            roomId: room.roomId,
-            roomUsers: room.players.map((player) => ({
-                name: player.name,
-                index: player.index,
-            })),
-        }));
-
-        safeSend(ws, {
-            type: 'update_room',
-            data: formattedRooms,
-            id: 0,
-        });
-        console.log(`Player ${playerName} added to room ${indexRoom}`);
-    } catch (error) {
-        safeSend(ws, {
-            type: 'add_user_to_room',
-            data: {
-                error: true,
-                errorText: error.message,
-            },
-            id: command.id,
-        });
-    }
-}
-
-
-function handleAddShips(ws: WebSocket, command: any) {
-    let data;
-
-    try {
-        data = typeof command.data === 'string' ? JSON.parse(command.data) : command.data;
-    } catch (error) {
-        safeSend(ws, {
-            type: 'add_ships',
-            data: {
-                error: true,
-                errorText: 'Invalid data format. Expected JSON object.',
-            },
-            id: command.id,
-        });
-        return;
     }
 
-    const { gameId, ships, indexPlayer } = data;
+    function handlePlayerLogin(ws: WebSocket, command: any) {
+        try {
+            const data = typeof command.data === 'string' ? JSON.parse(command.data) : command.data;
+            const player = handleLogin(data);
+            wsToPlayer.set(ws, player);
 
-    try {
-        addShipsToGame(gameId, indexPlayer, ships);
+            safeSend(ws, {
+                type: 'reg',
+                data: JSON.stringify({
+                    name: player.name,
+                    index: player.index,
+                    error: false,
+                    errorText: '',
+                }),
+                id: command.id,
+            });
+            safeSend(ws, {
+                type: 'update_winners',
+                data: JSON.stringify(getWinnersData()),
+                id: 0,
+            });
+        } catch (error: any) {
+            safeSend(ws, {
+                type: 'reg',
+                data: JSON.stringify({
+                    error: true,
+                    errorText: error.message,
+                }),
+                id: command.id,
+            });
+        }
+    }
 
-        safeSend(ws, {
-            type: 'add_ships',
-            data: {
-                error: false,
-                message: 'Ships added successfully.',
-            },
-            id: command.id,
-        });
-
-        console.log(`Player ${indexPlayer} added ships for game ${gameId}`);
-
-        const game = getGameById(gameId);
-        if (game && game.players.every(player => player.shipsAdded && player.ws)) {
-            startGame(gameId);
-            game.players.forEach(player => {
-                safeSend(player.ws, {
-                    type: 'start_game',
-                    data: {
-                        ships: player.ships,
-                        currentPlayerIndex: game.currentTurn,
-                    },
+    function handleCreateRoom(ws: WebSocket, command: any) {
+        try {
+            const player = wsToPlayer.get(ws);
+            if (!player) {
+                throw new Error('Player not registered or logged in.');
+            }
+            const room = createRoom();
+            addUserToRoom(room.roomId, player, ws);
+            const formattedRooms = getFormattedRooms();
+            clients.forEach(client => {
+                safeSend(client, {
+                    type: 'update_room',
+                    data: JSON.stringify(formattedRooms),
                     id: 0,
                 });
             });
-            console.log(`Game ${gameId} started`);
+            safeSend(ws, {
+                type: 'create_room',
+                data: JSON.stringify({
+                    roomId: room.roomId,
+                    error: false,
+                    errorText: '',
+                }),
+                id: command.id,
+            });
+
+            console.log(`Room ${room.roomId} created by player ${player.name}`);
+        } catch (error: any) {
+            safeSend(ws, {
+                type: 'create_room',
+                data: JSON.stringify({
+                    error: true,
+                    errorText: error.message,
+                }),
+                id: command.id,
+            });
         }
-    } catch (error) {
+    }
+
+    function handleAddUserToRoom(ws: WebSocket, command: any) {
+        try {
+            const data = typeof command.data === 'string' ? JSON.parse(command.data) : command.data;
+            const { indexRoom } = data;
+            const player = wsToPlayer.get(ws);
+            if (!player) {
+                throw new Error('Player not registered or logged in.');
+            }
+            const room = addUserToRoom(Number(indexRoom), player, ws);
+            const formattedRooms = getFormattedRooms();
+            clients.forEach(client => {
+                safeSend(client, {
+                    type: 'update_room',
+                    data: JSON.stringify(formattedRooms),
+                    id: 0,
+                });
+            });
+            if (room.players.length === 2) {
+                const gameId = createGame(room);
+                room.players.forEach((p: any, index: number) => {
+                    safeSend(p.ws, {
+                        type: 'create_game',
+                        data: JSON.stringify({
+                            idGame: gameId,
+                            idPlayer: index,
+                        }),
+                        id: 0,
+                    });
+                    console.log(`Sent 'create_game' to player ${p.player.name} for game ${gameId}`);
+                });
+                console.log(`Game ${gameId} created with players: ${room.players.map((p: any) => p.player.name).join(', ')}`);
+            }            
+
+            console.log(`Player ${player.name} added to room ${indexRoom}`);
+        } catch (error: any) {
+            safeSend(ws, {
+                type: 'add_user_to_room',
+                data: JSON.stringify({
+                    error: true,
+                    errorText: error.message,
+                }),
+                id: command.id,
+            });
+        }
+    }
+
+    function handleRandomAttack(ws: WebSocket, command: any) {
         safeSend(ws, {
-            type: 'add_ships',
-            data: {
-                error: true,
-                errorText: error.message,
-            },
+            type: 'error',
+            data: JSON.stringify({
+                error: 'randomAttack not implemented yet.',
+            }),
             id: command.id,
         });
     }
-}
-
-
-function safeSend(ws: WebSocket, message: any) {
-    try {
-        if (typeof message !== 'string') {
-            if (typeof message.data !== 'string') {
-                message.data = JSON.stringify(message.data);
-            }
-            message = JSON.stringify(message);
-        }
-        ws.send(message);
-    } catch (error) {
-        console.error('Error serializing message:', message, error);
-    }
-}
-
-function createGame(players: any[]) {
-    const gameId = gameIdCounter++;
-    games.push({
-        gameId,
-        players: players.map((player, index) => ({
-            ...player,
-            shipsAdded: false,
-            ships: [],
-            ws: player.ws,
-            index,
-        })),
-        currentTurn: Math.floor(Math.random() * players.length),
-        start: false,
-    });
-    return gameId;
 }
